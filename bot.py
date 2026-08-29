@@ -3,6 +3,7 @@ import json
 import hmac
 import hashlib
 import time
+import logging
 from fastapi import FastAPI, Request, Response, Header
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
@@ -10,11 +11,26 @@ from mystars_faas import AsyncMyStarsClient
 import uvicorn
 import httpx
 
+# === ЛОГИРОВАНИЕ ===
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
 # === КОНФИГУРАЦИЯ ===
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 MYSTARS_API_KEY = os.getenv("MYSTARS_API_KEY")
 WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET")
-RENDER_URL = os.getenv("RENDER_EXTERNAL_URL", "https://your-bot.onrender.com")
+RENDER_URL = os.getenv("RENDER_EXTERNAL_URL", "https://telegram-stars-bot-rc3.onrender.com")
+
+# === ПРОВЕРКА ПЕРЕМЕННЫХ ===
+if not all([BOT_TOKEN, MYSTARS_API_KEY, WEBHOOK_SECRET]):
+    logger.error("❌ Ошибка: Не все переменные окружения заданы!")
+    logger.error(f"BOT_TOKEN: {'✅' if BOT_TOKEN else '❌'}")
+    logger.error(f"MYSTARS_API_KEY: {'✅' if MYSTARS_API_KEY else '❌'}")
+    logger.error(f"WEBHOOK_SECRET: {'✅' if WEBHOOK_SECRET else '❌'}")
+    exit(1)
+
+logger.info(f"✅ Переменные окружения загружены")
+logger.info(f"🌐 RENDER_URL: {RENDER_URL}")
 
 # === ИНИЦИАЛИЗАЦИЯ ===
 app = FastAPI()
@@ -28,7 +44,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("📊 Мой баланс", callback_data="balance")],
     ]
     await update.message.reply_text(
-        "Добро пожаловать в магазин!\n"
+        "👋 Добро пожаловать в магазин!\n"
         "Выберите действие:",
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
@@ -142,6 +158,7 @@ async def process_purchase(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             
     except Exception as e:
+        logger.error(f"❌ Ошибка: {e}")
         await query.edit_message_text(
             f"❌ Ошибка при создании заказа:\n`{str(e)}`",
             parse_mode="Markdown"
@@ -162,47 +179,73 @@ telegram_app.add_handler(CallbackQueryHandler(back_to_menu, pattern="^back$"))
 # === WEBHOOK ДЛЯ TELEGRAM ===
 @app.post(f"/webhook/{WEBHOOK_SECRET}")
 async def telegram_webhook(request: Request):
-    data = await request.json()
-    update = Update.de_json(data, telegram_app.bot)
-    await telegram_app.process_update(update)
-    return {"ok": True}
+    try:
+        data = await request.json()
+        update = Update.de_json(data, telegram_app.bot)
+        await telegram_app.process_update(update)
+        logger.info(f"✅ Webhook обработан: {update.update_id}")
+        return {"ok": True}
+    except Exception as e:
+        logger.error(f"❌ Ошибка webhook: {e}")
+        return {"ok": False}
 
 # === WEBHOOK ДЛЯ MYSTARS ===
 @app.post("/webhooks/mystars")
 async def mystars_webhook(request: Request, x_signature: str = Header(None)):
-    body = await request.body()
-    
-    secret = WEBHOOK_SECRET.encode()
-    signature = hmac.new(secret, body, hashlib.sha256).hexdigest()
-    
-    if signature != x_signature:
-        return Response(status_code=403, content="Invalid signature")
-    
-    data = json.loads(body)
-    order_id = data.get("order_id")
-    status = data.get("status")
-    
-    print(f"📦 Заказ {order_id} → статус: {status}")
-    
-    return {"ok": True}
+    try:
+        body = await request.body()
+        
+        secret = WEBHOOK_SECRET.encode()
+        signature = hmac.new(secret, body, hashlib.sha256).hexdigest()
+        
+        if signature != x_signature:
+            logger.warning("⚠️ Неверная подпись webhook")
+            return Response(status_code=403, content="Invalid signature")
+        
+        data = json.loads(body)
+        order_id = data.get("order_id")
+        status = data.get("status")
+        
+        logger.info(f"📦 Заказ {order_id} → статус: {status}")
+        
+        return {"ok": True}
+    except Exception as e:
+        logger.error(f"❌ Ошибка в webhook MyStars: {e}")
+        return {"ok": False}
 
 # === HEALTH CHECK ===
 @app.get("/health")
 async def health():
-    return {"status": "ok", "service": "telegram-stars-bot"}
+    return {"status": "ok", "service": "telegram-stars-bot", "webhook_secret": WEBHOOK_SECRET[:8] + "..."}
+
+# === ROOT ===
+@app.get("/")
+async def root():
+    return {"message": "Telegram Stars Bot is running!"}
 
 # === ЗАПУСК ===
 if __name__ == "__main__":
+    logger.info("🚀 Запуск бота...")
+    
+    # Устанавливаем вебхук
     webhook_url = f"{RENDER_URL}/webhook/{WEBHOOK_SECRET}"
+    logger.info(f"🔗 Регистрируем вебхук: {webhook_url}")
     
-    resp = httpx.post(
-        f"https://api.telegram.org/bot{BOT_TOKEN}/setWebhook",
-        json={
-            "url": webhook_url,
-            "drop_pending_updates": True,
-            "allowed_updates": ["message", "callback_query"]
-        }
-    )
-    print(f"🔗 Webhook установлен: {resp.json()}")
+    try:
+        resp = httpx.post(
+            f"https://api.telegram.org/bot{BOT_TOKEN}/setWebhook",
+            json={
+                "url": webhook_url,
+                "drop_pending_updates": True,
+                "allowed_updates": ["message", "callback_query"]
+            }
+        )
+        result = resp.json()
+        logger.info(f"✅ Webhook установлен: {result}")
+    except Exception as e:
+        logger.error(f"❌ Ошибка установки webhook: {e}")
     
-    uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", 8000)))
+    # Запускаем сервер
+    port = int(os.getenv("PORT", 8000))
+    logger.info(f"🌐 Запуск сервера на порту {port}")
+    uvicorn.run(app, host="0.0.0.0", port=port)
