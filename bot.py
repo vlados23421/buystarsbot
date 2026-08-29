@@ -2,6 +2,7 @@ import os
 import json
 import hmac
 import hashlib
+import time
 from fastapi import FastAPI, Request, Response, Header
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
@@ -71,22 +72,19 @@ async def process_purchase(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = query.from_user.id
     username = query.from_user.username or str(user_id)
     
-    # Разбираем callback: stars_100, premium_3 и т.д.
     parts = data.split("_")
-    product_type = parts[0]  # stars или premium
-    amount = int(parts[1])   # 100, 500, 1, 3, 6, 12
+    product_type = parts[0]
+    amount = int(parts[1])
     
     try:
         async with AsyncMyStarsClient.production(MYSTARS_API_KEY) as client:
             if product_type == "stars":
-                # Покупка звёзд
                 quote = await client.get_pricing(
                     type="stars",
                     stars=amount,
                     payment_currency="ton"
                 )
                 
-                # Проверяем получателя
                 recipient = await client.check_recipient(username, type="stars")
                 if not recipient.eligible:
                     await query.edit_message_text(
@@ -95,7 +93,6 @@ async def process_purchase(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     )
                     return
                 
-                # Создаём заказ
                 order = await client.create_order(
                     type="stars",
                     recipient=username,
@@ -105,7 +102,7 @@ async def process_purchase(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     idempotency_key=f"order_{user_id}_{amount}_{int(time.time())}"
                 )
                 
-            else:  # premium
+            else:
                 quote = await client.get_pricing(
                     type="premium",
                     months=amount,
@@ -129,7 +126,6 @@ async def process_purchase(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     idempotency_key=f"order_{user_id}_{amount}_{int(time.time())}"
                 )
             
-            # Формируем платёжную информацию
             payment = order.payment
             payment_info = (
                 f"💳 **Оплата в TON**\n\n"
@@ -174,10 +170,8 @@ async def telegram_webhook(request: Request):
 # === WEBHOOK ДЛЯ MYSTARS ===
 @app.post("/webhooks/mystars")
 async def mystars_webhook(request: Request, x_signature: str = Header(None)):
-    """Принимает уведомления от MyStars о статусе заказа"""
     body = await request.body()
     
-    # Проверяем подпись
     secret = WEBHOOK_SECRET.encode()
     signature = hmac.new(secret, body, hashlib.sha256).hexdigest()
     
@@ -188,23 +182,19 @@ async def mystars_webhook(request: Request, x_signature: str = Header(None)):
     order_id = data.get("order_id")
     status = data.get("status")
     
-    # Здесь можно обновить статус заказа в БД и уведомить пользователя
     print(f"📦 Заказ {order_id} → статус: {status}")
     
     return {"ok": True}
 
-# === HEALTH CHECK ДЛЯ BETTER UPTIME ===
+# === HEALTH CHECK ===
 @app.get("/health")
 async def health():
     return {"status": "ok", "service": "telegram-stars-bot"}
 
 # === ЗАПУСК ===
 if __name__ == "__main__":
-    import time
-    # Регистрируем вебхук в Telegram при старте
     webhook_url = f"{RENDER_URL}/webhook/{WEBHOOK_SECRET}"
     
-    # Устанавливаем вебхук через httpx (синхронно для простоты)
     resp = httpx.post(
         f"https://api.telegram.org/bot{BOT_TOKEN}/setWebhook",
         json={
@@ -215,5 +205,4 @@ if __name__ == "__main__":
     )
     print(f"🔗 Webhook установлен: {resp.json()}")
     
-    # Запускаем сервер
     uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", 8000)))
